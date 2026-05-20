@@ -1,16 +1,51 @@
 {
   "name": "terminalwatch",
   "version": "0.1.0",
-  "private": true,
+  "description": "Live-mirror any logged-in user's terminal on a Linux server. Sysadmin TUI built with OpenTUI.",
   "type": "module",
   "bin": {
     "twatch": "./bin/twatch"
   },
+  "files": [
+    "bin",
+    "src",
+    "tsconfig.json",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "dev": "bun run src/index.tsx",
     "dev:mock": "TWATCH_MOCK=1 bun run src/index.tsx",
     "start": "bun run src/index.tsx",
     "typecheck": "bunx tsc --noEmit"
+  },
+  "keywords": [
+    "tui",
+    "terminal",
+    "sysadmin",
+    "monitoring",
+    "pty",
+    "strace",
+    "linux",
+    "ssh",
+    "watch",
+    "shell",
+    "opentui",
+    "bun"
+  ],
+  "homepage": "https://github.com/ItzAmirreza/terminalwatch#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ItzAmirreza/terminalwatch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ItzAmirreza/terminalwatch/issues"
+  },
+  "author": "ItzAmirreza",
+  "license": "MIT",
+  "os": ["linux"],
+  "engines": {
+    "bun": ">=1.0.0"
   },
   "dependencies": {
     "@opentui/core": "latest",

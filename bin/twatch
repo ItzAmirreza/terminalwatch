@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# twatch — terminal watch
-# Usage: twatch [--mock]
+# twatch — terminal watch.
+# Resolves its own location through symlinks (Bun's global install puts a
+# symlink to this file under ~/.bun/bin/) so it can find the bundled source
+# regardless of how it was invoked.
 set -e
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+script="${BASH_SOURCE[0]}"
+while [ -L "$script" ]; do
+  dir="$(cd "$(dirname "$script")" && pwd)"
+  script="$(readlink "$script")"
+  [[ "$script" != /* ]] && script="$dir/$script"
+done
+DIR="$(cd "$(dirname "$script")/.." && pwd)"
+
 exec bun run "$DIR/src/index.tsx" "$@"

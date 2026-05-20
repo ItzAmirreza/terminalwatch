@@ -16,24 +16,23 @@ output, full-screen apps like `vim` or `top`, all of it.
 
 ## Install
 
-On a fresh Ubuntu / Debian box, one line:
+If you already have [Bun](https://bun.sh) and `strace`:
+
+```bash
+bun i -g terminalwatch
+```
+
+On a fresh Ubuntu / Debian box (installs Bun + strace for you):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ItzAmirreza/terminalwatch/main/install.sh | bash
 ```
 
-That installs `bun`, `strace`, and `unzip` if missing, drops the source
-into `~/.local/share/twatch`, and writes a `/usr/local/bin/twatch`
-launcher so the command is immediately on `$PATH`.
+That script installs the system prereqs and Bun if missing, then
+either does `bun i -g terminalwatch` for you or falls back to a git
+clone, so `twatch` ends up on `$PATH`.
 
-Or, from a checkout:
-
-```bash
-git clone https://github.com/ItzAmirreza/terminalwatch.git
-cd terminalwatch && ./install.sh
-```
-
-Forking it? Override the source repo at install time:
+Forking? Override the source repo at install time:
 `TWATCH_REPO=https://github.com/you/yourfork.git bash install.sh`.
 
 ## Use
