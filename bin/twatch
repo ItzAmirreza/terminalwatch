@@ -1,10 +1,33 @@
 #!/usr/bin/env bash
 # twatch — terminal watch.
-# Resolves its own location through symlinks (Bun's global install puts a
-# symlink to this file under ~/.bun/bin/) so it can find the bundled source
-# regardless of how it was invoked.
+# Locates Bun in common install locations (the user's PATH may not include
+# ~/.bun/bin in non-interactive shells like `ssh host 'twatch'` or cron),
+# then resolves its own path through symlinks (Bun's global install puts a
+# symlink at ~/.bun/bin/twatch into the package's real bin/twatch) so it
+# can find the bundled source regardless of how it was invoked.
 set -e
 
+# 1. Find Bun.
+BUN="$(command -v bun 2>/dev/null || true)"
+if [ -z "$BUN" ]; then
+  for cand in \
+    "$HOME/.bun/bin/bun" \
+    /usr/local/bin/bun \
+    /opt/homebrew/bin/bun \
+    /opt/bun/bin/bun \
+    /usr/bin/bun
+  do
+    if [ -x "$cand" ]; then BUN="$cand"; break; fi
+  done
+fi
+if [ -z "$BUN" ]; then
+  echo "twatch: 'bun' runtime not found." >&2
+  echo "       Install Bun from https://bun.sh — \`curl -fsSL https://bun.sh/install | bash\`" >&2
+  exit 127
+fi
+
+# 2. Resolve our own location through symlinks (portable: BSD readlink
+#    doesn't have -f).
 script="${BASH_SOURCE[0]}"
 while [ -L "$script" ]; do
   dir="$(cd "$(dirname "$script")" && pwd)"
@@ -13,4 +36,4 @@ while [ -L "$script" ]; do
 done
 DIR="$(cd "$(dirname "$script")/.." && pwd)"
 
-exec bun run "$DIR/src/index.tsx" "$@"
+exec "$BUN" run "$DIR/src/index.tsx" "$@"
