@@ -2,20 +2,20 @@
 # twatch one-line installer (Ubuntu / Debian).
 #
 # Remote install:
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_GH_USER/terminalwatch/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ItzAmirreza/terminalwatch/main/install.sh | bash
 #
 # Local install (from a checkout):
 #   ./install.sh
 #
 # Env overrides:
-#   TWATCH_REPO       git URL (default: github.com/YOUR_GH_USER/terminalwatch.git)
+#   TWATCH_REPO       git URL (default: github.com/ItzAmirreza/terminalwatch.git)
 #   TWATCH_BRANCH     branch / ref (default: main)
 #   TWATCH_DIR        where to put the source (default: ~/.local/share/twatch)
 #   TWATCH_BIN_DIR    where to write the launcher (default: /usr/local/bin)
 
 set -euo pipefail
 
-REPO_URL="${TWATCH_REPO:-https://github.com/YOUR_GH_USER/terminalwatch.git}"
+REPO_URL="${TWATCH_REPO:-https://github.com/ItzAmirreza/terminalwatch.git}"
 BRANCH="${TWATCH_BRANCH:-main}"
 INSTALL_DIR="${TWATCH_DIR:-$HOME/.local/share/twatch}"
 BIN_DIR="${TWATCH_BIN_DIR:-/usr/local/bin}"

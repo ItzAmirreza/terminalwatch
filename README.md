@@ -19,7 +19,7 @@ output, full-screen apps like `vim` or `top`, all of it.
 On a fresh Ubuntu / Debian box, one line:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_GH_USER/terminalwatch/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ItzAmirreza/terminalwatch/main/install.sh | bash
 ```
 
 That installs `bun`, `strace`, and `unzip` if missing, drops the source
@@ -29,12 +29,12 @@ launcher so the command is immediately on `$PATH`.
 Or, from a checkout:
 
 ```bash
-git clone https://github.com/YOUR_GH_USER/terminalwatch.git
+git clone https://github.com/ItzAmirreza/terminalwatch.git
 cd terminalwatch && ./install.sh
 ```
 
-> Replace `YOUR_GH_USER` with the actual GitHub user/org once the repo
-> is pushed. Override via `TWATCH_REPO=https://… bash install.sh`.
+Forking it? Override the source repo at install time:
+`TWATCH_REPO=https://github.com/you/yourfork.git bash install.sh`.
 
 ## Use
 
