@@ -2,6 +2,7 @@ import { useKeyboard } from "@opentui/react";
 import { useEffect, useState } from "react";
 import type { Session } from "../sessions.ts";
 import { formatGeo, lookup, lookupCached, type GeoInfo } from "../geoip.ts";
+import type { UpdateState } from "../updater.ts";
 
 type Props = {
   sessions: Session[];
@@ -12,9 +13,11 @@ type Props = {
   // When provided, Esc / Left Arrow navigates back to the targets picker
   // instead of quitting the app entirely.
   onBack?: () => void;
+  update: UpdateState;
+  onUpdate: () => void;
 };
 
-export function SessionList({ sessions, hostLabel, onSelect, onQuit, onRefresh, onBack }: Props) {
+export function SessionList({ sessions, hostLabel, onSelect, onQuit, onRefresh, onBack, update, onUpdate }: Props) {
   const watchable = sessions.filter((s) => !s.isSelf);
   const [cursor, setCursor] = useState(0);
   const [geo, setGeo] = useState<Record<string, GeoInfo>>({});
@@ -46,6 +49,7 @@ export function SessionList({ sessions, hostLabel, onSelect, onQuit, onRefresh, 
     }
     if (k.name === "q") return onQuit();
     if (k.name === "r") return onRefresh();
+    if (k.name === "u" && update.hasUpdate) return onUpdate();
     if (k.name === "up" || k.name === "k") setCursor((c) => Math.max(0, c - 1));
     if (k.name === "down" || k.name === "j") setCursor((c) => Math.min(watchable.length - 1, c + 1));
     if (k.name === "return") {
@@ -56,11 +60,14 @@ export function SessionList({ sessions, hostLabel, onSelect, onQuit, onRefresh, 
 
   return (
     <box style={{ flexDirection: "column", width: "100%", height: "100%" }}>
-      <box style={{ height: 1, backgroundColor: "#1e3a5f", paddingLeft: 1, paddingRight: 1 }}>
+      <box style={{ height: 1, backgroundColor: "#1e3a5f", paddingLeft: 1, paddingRight: 1, flexDirection: "row" }}>
         <text fg="#7dd3fc">
           <strong>twatch</strong>
-          <span fg="#888"> — {hostLabel} — {watchable.length} watchable session{watchable.length === 1 ? "" : "s"}</span>
+          <span fg="#888"> — {hostLabel} — {watchable.length} watchable</span>
         </text>
+        {update.hasUpdate ? (
+          <text fg="#facc15">  · update v{update.latest} available · press u</text>
+        ) : null}
       </box>
 
       <box style={{ flexGrow: 1, flexDirection: "column", padding: 1 }}>

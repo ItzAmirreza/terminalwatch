@@ -4,12 +4,14 @@ import { userInfo } from "node:os";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SessionList } from "./ui/SessionList.tsx";
 import { TargetsList } from "./ui/TargetsList.tsx";
+import { AddTargetForm } from "./ui/AddTargetForm.tsx";
 import { hostLabel, isLinux, listSessions, type Session } from "./sessions.ts";
 import { startWatch, demoMockStream } from "./watch.ts";
 import { fetchHistory, renderPreamble } from "./history.ts";
 import { formatGeo, lookup, lookupCached } from "./geoip.ts";
 import { LocalTransport, SshTransport, type Transport } from "./transport.ts";
 import { listTargets, LOCAL_TARGET, targetToSsh, type Target } from "./targets.ts";
+import { checkForUpdate, runSelfUpdate, type UpdateState } from "./updater.ts";
 
 const MOCK = process.env.TWATCH_MOCK === "1" || process.argv.includes("--mock");
 
@@ -91,6 +93,7 @@ const CLI = parseCli();
 
 type Screen =
   | { kind: "targets" }
+  | { kind: "add-target" }
   | { kind: "sessions"; transport: Transport; target: Target | null };
 
 function App() {
@@ -104,6 +107,21 @@ function App() {
     return { kind: "targets" };
   });
   const [banner, setBanner] = useState<string | null>(null);
+  const [update, setUpdate] = useState<UpdateState>(() => checkForUpdate((later) => setUpdate(later)));
+
+  const runUpdate = useCallback(() => {
+    renderer.suspend();
+    process.stdout.write(`\x1b[2J\x1b[H\x1b[36mUpdating terminalwatch to ${update.latest ?? "latest"} …\x1b[0m\r\n\r\n`);
+    const r = runSelfUpdate();
+    process.stdout.write(r.stdout);
+    process.stdout.write(r.stderr);
+    if (r.status === 0) {
+      process.stdout.write(`\r\n\x1b[32m✓\x1b[0m updated. Re-run \`twatch\` to use the new version.\r\n`);
+    } else {
+      process.stdout.write(`\r\n\x1b[31m✗\x1b[0m update failed (exit ${r.status}).\r\n`);
+    }
+    process.exit(r.status ?? 0);
+  }, [renderer, update]);
 
   const refreshTargets = useCallback(() => {
     setTargets(listTargets());
@@ -147,9 +165,21 @@ function App() {
       <TargetsList
         targets={targets}
         onSelect={openTarget}
+        onAdd={() => setScreen({ kind: "add-target" })}
         onQuit={quit}
         onRefresh={refreshTargets}
         banner={banner}
+        update={update}
+        onUpdate={runUpdate}
+      />
+    );
+  }
+
+  if (screen.kind === "add-target") {
+    return (
+      <AddTargetForm
+        onSaved={() => { refreshTargets(); setScreen({ kind: "targets" }); }}
+        onCancel={() => setScreen({ kind: "targets" })}
       />
     );
   }
@@ -161,6 +191,8 @@ function App() {
       onQuit={quit}
       onBack={backToTargets}
       canGoBack={!CLI.preselectedTransport}
+      update={update}
+      onUpdate={runUpdate}
     />
   );
 }
@@ -171,9 +203,11 @@ function SessionsScreen(props: {
   onQuit: () => void;
   onBack: () => void;
   canGoBack: boolean;
+  update: UpdateState;
+  onUpdate: () => void;
 }) {
   const renderer = useRenderer();
-  const { transport, target, onQuit, onBack, canGoBack } = props;
+  const { transport, target, onQuit, onBack, canGoBack, update, onUpdate } = props;
   const [sessions, setSessions] = useState<Session[]>(() => listSessions(transport));
   const [err, setErr] = useState<string | null>(null);
 
@@ -248,6 +282,8 @@ function SessionsScreen(props: {
         onQuit={onQuit}
         onRefresh={refresh}
         onBack={canGoBack ? onBack : undefined}
+        update={update}
+        onUpdate={onUpdate}
       />
       {err ? (
         <box style={{ height: 1, backgroundColor: "#7f1d1d", paddingLeft: 1 }}>

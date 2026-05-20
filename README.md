@@ -138,7 +138,22 @@ harnesses used to validate the filter against real workloads
 Tagged `(wip)` = in progress, `(idea)` = speculative. Anything else
 unchecked is planned next-up.
 
-### Shipped (v0.2)
+### Shipped (v0.4)
+
+- [x] **Add-server form** in the targets picker — `a` (or scroll to
+      "+ add server…" and Enter) opens a form: name, user, host,
+      port?, identity file? Saves to `~/.config/twatch/targets.json`.
+- [x] **Auto-updater** — startup fetches the latest version from npm
+      (cached 6h in `~/.cache/twatch/update-check.json`). If newer, a
+      yellow badge in the header reads `update vX.Y.Z available · press u`;
+      pressing `u` runs `bun add -g terminalwatch@latest` and exits so
+      you re-launch with the new version.
+- [x] **CI auto-publish** — `.github/workflows/publish.yml` checks
+      whether `package.json`'s version is newer than npm's on every
+      push to `main`. New version → `bun publish` runs with `NPM_TOKEN`.
+      Unchanged → silent skip.
+
+### Shipped (v0.2 / v0.3)
 
 - [x] **Remote mode** — `twatch --remote user@host`. See "Use" above.
 - [x] Transport abstraction (`LocalTransport` / `SshTransport`) so the
@@ -171,8 +186,7 @@ unchecked is planned next-up.
       vs. SSH; SSH calls multiplexed through one ControlMaster socket.
 - [x] **Targets picker** — first screen lists local + ssh-config +
       saved entries; Enter opens one, Esc returns.
-- [ ] (wip) **Add-server form** in the targets picker — write to
-      `~/.config/twatch/targets.json` without hand-editing.
+- [x] **Add-server form** — writes to `~/.config/twatch/targets.json`.
 - [ ] **Session recording** — `--record file.cast` writes asciicast v2;
       replays with `asciinema play` or `twatch --replay`.
 - [ ] **Audit log** — append every attach (operator, target, duration,
