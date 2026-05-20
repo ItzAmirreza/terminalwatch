@@ -116,11 +116,60 @@ harnesses used to validate the filter against real workloads
 
 ## Roadmap
 
-- Remote mode: run `twatch` on your laptop, target a remote VPS over
-  SSH (`twatch --remote azureuser@host`). The plumbing is the same; the
-  spawn target moves to the other side.
-- Optional vt-renderer so the watch view stays inside the TUI (instead
-  of taking over the whole terminal), enabling split-view and side-by-
-  side comparisons.
-- Audit log: append timestamped session metadata for every attach so
-  there's a record of who watched whom and when.
+Legend: ✅ shipped · 🚧 in progress · ⏳ planned · 💭 idea
+
+### Shipped (v0.1)
+
+- ✅ List logged-in PTY sessions (`who` + `ps -e`)
+- ✅ Live mirror via `sudo strace -f`, ANSI replayed verbatim
+- ✅ Noise filter: drop pipe writes, only forward writes whose fd points
+  at the target pts
+- ✅ Handle Ubuntu's default `sudo use_pty`: keep monitor relay writes
+  via `/dev/tty` when the writer's controlling tty matches the target
+- ✅ Cross-user listing (works for any user on the box, not just yours)
+- ✅ Left Arrow / Esc to detach
+- ✅ IP geolocation column (ip-api.com)
+- ✅ Pre-attach context: login, idle, foreground proc, `~/.bash_history`
+  tail
+- ✅ One-line installer (`curl … | bash`)
+- ✅ Published on npm — `bun i -g terminalwatch`
+
+### Tier 1 — natural next steps
+
+- 🚧 **Remote mode** — `twatch --remote user@host`: operator on laptop,
+  target on a remote VPS. Transport layer abstracts local vs. SSH.
+- ⏳ **Session recording** — `--record file.cast` writes asciicast v2;
+  replays with `asciinema play` or `twatch --replay`.
+- ⏳ **Audit log** — append every attach (operator, target, duration,
+  detach reason) to `~/.local/share/twatch/audit.log`.
+
+### Tier 2 — UX wins
+
+- ⏳ **In-TUI watch view** — render the byte stream into an OpenTUI
+  cell grid via a headless vt emulator instead of taking over the
+  terminal. Enables session-switching without redraws.
+- ⏳ **Multi-watch split** — tile 2/3/4 sessions side-by-side (depends
+  on in-TUI renderer).
+- ⏳ **Pause / scrollback / search** — `Space` pauses, `↑/↓` scrolls,
+  `/foo` highlights (depends on in-TUI renderer).
+
+### Tier 3 — sysadmin power
+
+- 💭 **Show keystrokes separately** — trace `read(0, …)` on the
+  foreground process to surface what they're typing before render.
+- 💭 **Danger-command alerts** — flash on `rm -rf`, `chmod 777`,
+  `curl … | sudo bash`, etc.
+- 💭 **New-login notifications** — watch `/var/run/utmp`, POST to a
+  configurable webhook on each new PTY.
+- 💭 **In-memory bash history** — inject opt-in `PROMPT_COMMAND` so
+  history is flushed per command (current preview shows only the file
+  on disk, which flushes on shell exit).
+
+### Tier 4 — speculative / heavy
+
+- 💭 **eBPF backend** — replace strace with `tty_write` kprobes for
+  zero-overhead, multi-watcher scaling.
+- 💭 **Container awareness** — detect `docker exec` / `kubectl exec`
+  sessions, enter the right pid namespace before attaching.
+- 💭 **Web UI** — stream the same byte channel into a browser tab via
+  xterm.js. Pairs with session recording for sharable links.
