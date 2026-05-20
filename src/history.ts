@@ -8,24 +8,21 @@
 // signal — full in-memory history would require reading the bash process
 // memory, which we'd rather avoid for v1.
 
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import type { Transport } from "./transport.ts";
 
-export function fetchHistory(targetUser: string, lines: number, currentUser: string): {
-  source: string;
-  entries: string[];
-} {
-  // Prefer reading directly when running as the same UID; otherwise sudo.
+export function fetchHistory(
+  transport: Transport,
+  targetUser: string,
+  lines: number,
+  currentUser: string,
+): { source: string; entries: string[] } {
   const histPath = `/home/${targetUser}/.bash_history`;
-  let result: SpawnSyncReturns<string>;
-  if (targetUser === currentUser) {
-    result = spawnSync("tail", ["-n", String(lines), histPath], { encoding: "utf8" });
-  } else {
-    result = spawnSync("sudo", ["-n", "tail", "-n", String(lines), histPath], { encoding: "utf8" });
-  }
-  if (result.status !== 0) {
-    return { source: histPath, entries: [] };
-  }
-  const entries = result.stdout
+  const argv = (targetUser === currentUser)
+    ? ["tail", "-n", String(lines), histPath]
+    : ["sudo", "-n", "tail", "-n", String(lines), histPath];
+  const r = transport.execCapture(argv);
+  if (r.status !== 0) return { source: histPath, entries: [] };
+  const entries = r.stdout
     .split("\n")
     .map((s) => s.trim())
     .filter((s) => s.length > 0 && !s.startsWith("#"));

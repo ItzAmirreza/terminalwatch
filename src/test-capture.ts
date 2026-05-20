@@ -9,11 +9,12 @@
 import { listSessions } from "./sessions.ts";
 import { decodeCEscaped, findCloseQuote } from "./cescape.ts";
 import { FdResolver } from "./fdfilter.ts";
+import { LocalTransport } from "./transport.ts";
 import { spawn } from "node:child_process";
 
 const seconds = parseInt(process.argv[2] ?? "4", 10);
-
-const sessions = listSessions();
+const transport = new LocalTransport();
+const sessions = listSessions(transport);
 console.log("Discovered sessions:");
 for (const s of sessions) {
   console.log(
@@ -27,7 +28,7 @@ if (!target) {
 }
 console.log(`\nAttaching to ${target.user}@${target.tty} (pid=${target.shellPid}, pts=${target.ttyDev}) for ${seconds}s ...\n`);
 
-const resolver = new FdResolver(target.ttyDev, true);
+const resolver = new FdResolver(target.ttyDev, transport, true);
 const collected: Buffer[] = [];
 const dropped = { lines: 0, bytes: 0 };
 let kept = 0;

@@ -38,7 +38,9 @@ Forking? Override the source repo at install time:
 ## Use
 
 ```bash
-twatch
+twatch                                  # watch sessions on this box
+twatch --remote azureuser@vps           # watch sessions on a remote box over SSH
+twatch --remote azureuser@vps -i ~/.ssh/key.pem -p 2222
 ```
 
 - **↑ / ↓** — move the cursor
@@ -47,6 +49,13 @@ twatch
 - **q** / **Esc** — quit
 - **← / Esc** (while attached) — detach back to the list
 - **Ctrl+C** (while attached) — same as detach
+
+In `--remote` mode the TUI runs on your laptop, but every command
+(`who`, `ps`, `sudo strace`, `readlink /proc/PID/fd/N`, etc.) executes
+on the target box. SSH connections are multiplexed through one OpenSSH
+ControlMaster socket so per-call latency stays in the tens of ms after
+the initial handshake. The remote user must have sudo (passwordless or
+interactive) for the attach step.
 
 Before the live stream starts you get a one-screen preamble: login
 time, IP geolocation, and the tail of the target's `~/.bash_history` so
@@ -119,6 +128,12 @@ harnesses used to validate the filter against real workloads
 Tagged `(wip)` = in progress, `(idea)` = speculative. Anything else
 unchecked is planned next-up.
 
+### Shipped (v0.2)
+
+- [x] **Remote mode** — see "Use" above.
+- [x] Transport abstraction (`LocalTransport` / `SshTransport`) so the
+      same code paths drive both local and SSH execution.
+
 ### Shipped (v0.1)
 
 - [x] List logged-in PTY sessions (`who` + `ps -e`)
@@ -137,9 +152,9 @@ unchecked is planned next-up.
 
 ### Tier 1 — natural next steps
 
-- [ ] (wip) **Remote mode** — `twatch --remote user@host`: operator on
+- [x] **Remote mode** — `twatch --remote user@host`: operator on
       laptop, target on a remote VPS. Transport layer abstracts local
-      vs. SSH.
+      vs. SSH; SSH calls multiplexed through one ControlMaster socket.
 - [ ] **Session recording** — `--record file.cast` writes asciicast v2;
       replays with `asciinema play` or `twatch --replay`.
 - [ ] **Audit log** — append every attach (operator, target, duration,

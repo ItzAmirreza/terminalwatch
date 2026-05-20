@@ -6,12 +6,13 @@
 
 import { listSessions } from "./sessions.ts";
 import { decodeCEscaped, findCloseQuote } from "./cescape.ts";
+import { LocalTransport } from "./transport.ts";
 import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, readlinkSync } from "node:fs";
 
 const seconds = parseInt(process.argv[2] ?? "8", 10);
-
-const target = listSessions().find((s) => !s.isSelf && s.shellPid);
+const transport = new LocalTransport();
+const target = listSessions(transport).find((s) => !s.isSelf && s.shellPid);
 if (!target) {
   console.error("No watchable session.");
   process.exit(2);

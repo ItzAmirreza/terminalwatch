@@ -14,9 +14,10 @@
 // We deliberately do NOT forward keystrokes back to the target — passive
 // observation only. Left Arrow or Esc detaches.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
 import { decodeCEscaped, findCloseQuote } from "./cescape.ts";
 import { FdResolver } from "./fdfilter.ts";
+import type { Transport } from "./transport.ts";
 
 export type WatchHandle = {
   detach: () => void;
@@ -24,6 +25,8 @@ export type WatchHandle = {
 };
 
 export type WatchOptions = {
+  // Where the target lives (local or SSH).
+  transport: Transport;
   shellPid: number;
   // Path like "/dev/pts/0" — used to filter strace writes to actual tty
   // output (vs. pipe writes from helper procs).
@@ -55,7 +58,7 @@ export function startWatch(opts: WatchOptions): WatchHandle {
   let mockAbort: AbortController | null = null;
   const resolver = opts.mockStream
     ? null
-    : new FdResolver(opts.targetPts, opts.useSudo !== false);
+    : new FdResolver(opts.targetPts, opts.transport, opts.useSudo !== false);
 
   if (opts.mockStream) {
     mockAbort = new AbortController();
@@ -71,7 +74,7 @@ export function startWatch(opts: WatchOptions): WatchHandle {
       }
     })();
   } else {
-    const args = [
+    const straceArgs = [
       "-f",
       "-p", String(opts.shellPid),
       "-e", "trace=write",
@@ -79,9 +82,10 @@ export function startWatch(opts: WatchOptions): WatchHandle {
       "-s", "65535",
       "-qq",
     ];
-    const cmd = opts.useSudo === false ? "strace" : "sudo";
-    const argv = opts.useSudo === false ? args : ["-n", "strace", ...args];
-    child = spawn(cmd, argv, { stdio: ["ignore", "ignore", "pipe"] });
+    const argv = opts.useSudo === false
+      ? ["strace", ...straceArgs]
+      : ["sudo", "-n", "strace", ...straceArgs];
+    child = opts.transport.spawnPipe(argv, { stdio: ["ignore", "ignore", "pipe"] });
 
     const parser = new StraceLineParser(
       opts.shellPid,
