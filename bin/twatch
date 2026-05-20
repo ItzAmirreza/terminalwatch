@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# twatch — terminal watch
+# Usage: twatch [--mock]
+set -e
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec bun run "$DIR/src/index.tsx" "$@"
