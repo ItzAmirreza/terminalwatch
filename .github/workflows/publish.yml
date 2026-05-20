@@ -17,7 +17,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -38,19 +38,30 @@ jobs:
           fi
           echo "local=$LOCAL  remote=$REMOTE"
 
+      - name: Check for NPM_TOKEN
+        id: secret
+        run: |
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "has=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=yes" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Install dependencies
-        if: steps.ver.outputs.publish == 'yes'
+        if: steps.ver.outputs.publish == 'yes' && steps.secret.outputs.has == 'yes'
         run: bun install --frozen-lockfile
 
       - name: Configure npm auth
-        if: steps.ver.outputs.publish == 'yes'
+        if: steps.ver.outputs.publish == 'yes' && steps.secret.outputs.has == 'yes'
         run: |
           echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$HOME/.npmrc"
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish
-        if: steps.ver.outputs.publish == 'yes'
+        if: steps.ver.outputs.publish == 'yes' && steps.secret.outputs.has == 'yes'
         run: bun publish --access public
 
       - name: Summary
@@ -60,5 +71,15 @@ jobs:
             echo ""
             echo "- local  version: \`${{ steps.ver.outputs.local }}\`"
             echo "- npm    version: \`${{ steps.ver.outputs.remote }}\`"
-            echo "- result: \`${{ steps.ver.outputs.publish == 'yes' && 'published' || 'skipped (version unchanged)' }}\`"
+            if [ "${{ steps.ver.outputs.publish }}" = "no" ]; then
+              echo "- result: \`skipped — version unchanged\`"
+            elif [ "${{ steps.secret.outputs.has }}" = "no" ]; then
+              echo "- result: \`skipped — NPM_TOKEN secret missing\`"
+              echo ""
+              echo "Add a secret at \`Settings → Secrets and variables → Actions → New repository secret\`:"
+              echo "name: \`NPM_TOKEN\`, value: an npm Automation token or Granular Access Token with"
+              echo "publish permission on \`terminalwatch\` and 'Bypass 2FA for publishing' enabled."
+            else
+              echo "- result: \`published\`"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
