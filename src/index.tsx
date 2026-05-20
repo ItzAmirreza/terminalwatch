@@ -1,19 +1,21 @@
 import { createCliRenderer } from "@opentui/core";
 import { createRoot, useRenderer } from "@opentui/react";
 import { userInfo } from "node:os";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { SessionList } from "./ui/SessionList.tsx";
+import { TargetsList } from "./ui/TargetsList.tsx";
 import { hostLabel, isLinux, listSessions, type Session } from "./sessions.ts";
 import { startWatch, demoMockStream } from "./watch.ts";
 import { fetchHistory, renderPreamble } from "./history.ts";
 import { formatGeo, lookup, lookupCached } from "./geoip.ts";
 import { LocalTransport, SshTransport, type Transport } from "./transport.ts";
+import { listTargets, LOCAL_TARGET, targetToSsh, type Target } from "./targets.ts";
 
 const MOCK = process.env.TWATCH_MOCK === "1" || process.argv.includes("--mock");
 
 type Cli = {
-  transport: Transport;
-  remote: boolean;
+  // If set, skip the targets picker and go straight to this transport.
+  preselectedTransport: Transport | null;
 };
 
 function parseCli(): Cli {
@@ -51,11 +53,10 @@ function parseCli(): Cli {
   }
   if (remoteTarget) {
     return {
-      transport: new SshTransport({ target: remoteTarget, extraArgs: sshExtra }),
-      remote: true,
+      preselectedTransport: new SshTransport({ target: remoteTarget, extraArgs: sshExtra }),
     };
   }
-  return { transport: new LocalTransport(), remote: false };
+  return { preselectedTransport: null };
 }
 
 function bail(msg: string): never {
@@ -69,14 +70,18 @@ function printHelp() {
     [
       "Usage: twatch [--remote user@host [-i KEY] [-p PORT] [-o OPT]] [--mock]",
       "",
-      "  --remote, -r  USER@HOST   watch sessions on a remote box over SSH",
+      "Without --remote, twatch opens a targets picker (local + ssh-config",
+      "Host entries + saved targets) — Enter to open one.",
+      "",
+      "  --remote, -r  USER@HOST   skip the picker, open this remote directly",
       "  -i PATH                   SSH identity file (forwarded to ssh -i)",
       "  -p PORT                   SSH port (forwarded to ssh -p)",
       "  -o OPT                    extra ssh -o option (repeatable)",
       "  --mock                    fake data for UI dev on non-Linux hosts",
       "",
-      "Keys (in the list):     ↑/↓ move · Enter watch · r refresh · q quit",
-      "Keys (while attached):  ← or Esc detach · Ctrl+C also detaches",
+      "Keys (targets):    ↑/↓ move · Enter open · r refresh · q quit",
+      "Keys (sessions):   ↑/↓ move · Enter watch · r refresh · Esc back · q quit",
+      "Keys (attached):   ← or Esc detach · Ctrl+C also detaches",
       "",
     ].join("\n"),
   );
@@ -84,63 +89,144 @@ function printHelp() {
 
 const CLI = parseCli();
 
+type Screen =
+  | { kind: "targets" }
+  | { kind: "sessions"; transport: Transport; target: Target | null };
+
 function App() {
   const renderer = useRenderer();
-  const [sessions, setSessions] = useState<Session[]>(() => listSessions(CLI.transport));
+
+  const [targets, setTargets] = useState<Target[]>(() => listTargets());
+  const [screen, setScreen] = useState<Screen>(() => {
+    if (CLI.preselectedTransport) {
+      return { kind: "sessions", transport: CLI.preselectedTransport, target: null };
+    }
+    return { kind: "targets" };
+  });
+  const [banner, setBanner] = useState<string | null>(null);
+
+  const refreshTargets = useCallback(() => {
+    setTargets(listTargets());
+    setBanner(null);
+  }, []);
+
+  const quit = useCallback(() => {
+    if (screen.kind === "sessions") {
+      try { screen.transport.close(); } catch {}
+    }
+    renderer.destroy();
+    process.exit(0);
+  }, [renderer, screen]);
+
+  const openTarget = useCallback((t: Target) => {
+    if (t.kind === "local") {
+      setScreen({ kind: "sessions", transport: new LocalTransport(), target: t });
+      return;
+    }
+    const ssh = targetToSsh(t);
+    if (!ssh) return;
+    const transport = new SshTransport({ target: ssh.target, extraArgs: ssh.extraArgs });
+    try {
+      transport.open();
+    } catch (e: any) {
+      setBanner(`ssh ${ssh.target} failed: ${String(e?.message ?? e).split("\n")[0]}`);
+      return;
+    }
+    setScreen({ kind: "sessions", transport, target: t });
+  }, []);
+
+  const backToTargets = useCallback(() => {
+    if (screen.kind === "sessions") {
+      try { screen.transport.close(); } catch {}
+    }
+    setScreen({ kind: "targets" });
+  }, [screen]);
+
+  if (screen.kind === "targets") {
+    return (
+      <TargetsList
+        targets={targets}
+        onSelect={openTarget}
+        onQuit={quit}
+        onRefresh={refreshTargets}
+        banner={banner}
+      />
+    );
+  }
+
+  return (
+    <SessionsScreen
+      transport={screen.transport}
+      target={screen.target}
+      onQuit={quit}
+      onBack={backToTargets}
+      canGoBack={!CLI.preselectedTransport}
+    />
+  );
+}
+
+function SessionsScreen(props: {
+  transport: Transport;
+  target: Target | null;
+  onQuit: () => void;
+  onBack: () => void;
+  canGoBack: boolean;
+}) {
+  const renderer = useRenderer();
+  const { transport, target, onQuit, onBack, canGoBack } = props;
+  const [sessions, setSessions] = useState<Session[]>(() => listSessions(transport));
   const [err, setErr] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     try {
-      setSessions(listSessions(CLI.transport));
+      setSessions(listSessions(transport));
       setErr(null);
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     }
-  }, []);
+  }, [transport]);
 
   useEffect(() => {
     const t = setInterval(refresh, 3000);
     return () => clearInterval(t);
   }, [refresh]);
 
-  const quit = useCallback(() => {
-    CLI.transport.close();
-    renderer.destroy();
-    process.exit(0);
-  }, [renderer]);
+  const title = useMemo(() => {
+    if (target?.kind === "ssh") return target.label;
+    return hostLabel(transport);
+  }, [target, transport]);
 
   const onSelect = useCallback(
-    async (target: Session) => {
-      // Local Mac: refuse unless mocking.
-      if (!MOCK && CLI.transport.isLocal() && !isLinux()) {
+    async (sess: Session) => {
+      if (!MOCK && transport.isLocal() && !isLinux()) {
         setErr("Live watch only works on Linux. Run with TWATCH_MOCK=1 for a demo.");
         return;
       }
-      if (!target.shellPid && !MOCK) {
-        setErr(`No shell PID for ${target.tty}; can't attach.`);
+      if (!sess.shellPid && !MOCK) {
+        setErr(`No shell PID for ${sess.tty}; can't attach.`);
         return;
       }
 
-      const geoInfo = lookupCached(target.from) ?? (await lookup(target.from).catch(() => null));
+      const geoInfo = lookupCached(sess.from) ?? (await lookup(sess.from).catch(() => null));
       const history = MOCK
         ? { source: "(mock)", entries: ["ls -la", "vim deploy.yml", "sudo systemctl restart api"] }
-        : fetchHistory(CLI.transport, target.user, 10, userInfo().username);
+        : fetchHistory(transport, sess.user, 10, userInfo().username);
       const preamble = renderPreamble({
-        user: target.user,
-        tty: target.tty,
-        from: target.from,
+        user: sess.user,
+        tty: sess.tty,
+        from: sess.from,
         geoLabel: formatGeo(geoInfo),
-        loginAt: target.loginAt,
-        idle: target.idle,
-        foregroundComm: target.foregroundComm,
+        loginAt: sess.loginAt,
+        idle: sess.idle,
+        foregroundComm: sess.foregroundComm,
         history,
       });
 
       renderer.suspend();
       const handle = startWatch({
-        transport: CLI.transport,
-        shellPid: target.shellPid ?? 0,
-        targetPts: target.ttyDev,
+        transport,
+        shellPid: sess.shellPid ?? 0,
+        targetPts: sess.ttyDev,
         useSudo: !MOCK,
         preamble,
         mockStream: MOCK ? demoMockStream() : undefined,
@@ -150,17 +236,18 @@ function App() {
       if (result.reason === "error") setErr(`watch failed: ${result.err}`);
       refresh();
     },
-    [renderer, refresh],
+    [renderer, refresh, transport],
   );
 
   return (
     <box style={{ flexDirection: "column", width: "100%", height: "100%" }}>
       <SessionList
         sessions={sessions}
-        hostLabel={hostLabel(CLI.transport)}
+        hostLabel={title}
         onSelect={onSelect}
-        onQuit={quit}
+        onQuit={onQuit}
         onRefresh={refresh}
+        onBack={canGoBack ? onBack : undefined}
       />
       {err ? (
         <box style={{ height: 1, backgroundColor: "#7f1d1d", paddingLeft: 1 }}>
@@ -169,17 +256,6 @@ function App() {
       ) : null}
     </box>
   );
-}
-
-// If we're in remote mode, prime the SSH ControlMaster eagerly so the
-// first listSessions() call doesn't take the connection-setup cost.
-if (CLI.remote && CLI.transport instanceof SshTransport) {
-  try {
-    CLI.transport.open();
-  } catch (e: any) {
-    process.stderr.write(`twatch: ${String(e?.message ?? e)}\n`);
-    process.exit(1);
-  }
 }
 
 const renderer = await createCliRenderer({

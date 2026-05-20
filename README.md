@@ -38,24 +38,34 @@ Forking? Override the source repo at install time:
 ## Use
 
 ```bash
-twatch                                  # watch sessions on this box
-twatch --remote azureuser@vps           # watch sessions on a remote box over SSH
+twatch                                  # opens the targets picker
+twatch --remote azureuser@vps           # skip the picker, open this remote
 twatch --remote azureuser@vps -i ~/.ssh/key.pem -p 2222
 ```
 
-- **↑ / ↓** — move the cursor
-- **Enter** — attach to the highlighted session
-- **r** — re-scan for new logins
-- **q** / **Esc** — quit
-- **← / Esc** (while attached) — detach back to the list
-- **Ctrl+C** (while attached) — same as detach
+Plain `twatch` shows three flavors of targets:
 
-In `--remote` mode the TUI runs on your laptop, but every command
-(`who`, `ps`, `sudo strace`, `readlink /proc/PID/fd/N`, etc.) executes
-on the target box. SSH connections are multiplexed through one OpenSSH
-ControlMaster socket so per-call latency stays in the tens of ms after
-the initial handshake. The remote user must have sudo (passwordless or
-interactive) for the attach step.
+- **local** — this box.
+- **ssh-config** — every concrete `Host` entry in `~/.ssh/config`
+  (wildcards / globs skipped). Use these to inherit your existing ssh
+  config — keys, ports, jump hosts, etc.
+- **saved** — entries in `~/.config/twatch/targets.json`, an array of
+  `{name, user, host, port?, identityFile?}`. Hand-edit for now; an
+  in-UI add form is coming in 0.3.x.
+
+Keys:
+
+- **Targets**:  `↑/↓` move · `Enter` open · `r` refresh · `q` quit
+- **Sessions**: `↑/↓` move · `Enter` watch · `r` refresh · `← / Esc`
+  back to targets · `q` quit
+- **Attached**: `← / Esc` detach · `Ctrl+C` also detaches
+
+In `--remote` (or any ssh target) mode the TUI runs on your laptop, but
+every command (`who`, `ps`, `sudo strace`, `readlink /proc/PID/fd/N`,
+etc.) executes on the target box. SSH connections are multiplexed
+through one OpenSSH ControlMaster socket so per-call latency stays in
+the tens of ms after the initial handshake. The remote user must have
+sudo (passwordless or interactive) for the attach step.
 
 Before the live stream starts you get a one-screen preamble: login
 time, IP geolocation, and the tail of the target's `~/.bash_history` so
@@ -130,9 +140,13 @@ unchecked is planned next-up.
 
 ### Shipped (v0.2)
 
-- [x] **Remote mode** — see "Use" above.
+- [x] **Remote mode** — `twatch --remote user@host`. See "Use" above.
 - [x] Transport abstraction (`LocalTransport` / `SshTransport`) so the
       same code paths drive both local and SSH execution.
+- [x] **Targets picker** — plain `twatch` opens a first-screen picker
+      backed by `~/.ssh/config` Host entries plus
+      `~/.config/twatch/targets.json`. `Esc` / `←` from the session
+      list pops back to targets so you can switch hosts without quitting.
 
 ### Shipped (v0.1)
 
@@ -155,6 +169,10 @@ unchecked is planned next-up.
 - [x] **Remote mode** — `twatch --remote user@host`: operator on
       laptop, target on a remote VPS. Transport layer abstracts local
       vs. SSH; SSH calls multiplexed through one ControlMaster socket.
+- [x] **Targets picker** — first screen lists local + ssh-config +
+      saved entries; Enter opens one, Esc returns.
+- [ ] (wip) **Add-server form** in the targets picker — write to
+      `~/.config/twatch/targets.json` without hand-editing.
 - [ ] **Session recording** — `--record file.cast` writes asciicast v2;
       replays with `asciinema play` or `twatch --replay`.
 - [ ] **Audit log** — append every attach (operator, target, duration,

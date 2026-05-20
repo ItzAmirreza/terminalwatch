@@ -9,9 +9,12 @@ type Props = {
   onSelect: (s: Session) => void;
   onQuit: () => void;
   onRefresh: () => void;
+  // When provided, Esc / Left Arrow navigates back to the targets picker
+  // instead of quitting the app entirely.
+  onBack?: () => void;
 };
 
-export function SessionList({ sessions, hostLabel, onSelect, onQuit, onRefresh }: Props) {
+export function SessionList({ sessions, hostLabel, onSelect, onQuit, onRefresh, onBack }: Props) {
   const watchable = sessions.filter((s) => !s.isSelf);
   const [cursor, setCursor] = useState(0);
   const [geo, setGeo] = useState<Record<string, GeoInfo>>({});
@@ -37,7 +40,11 @@ export function SessionList({ sessions, hostLabel, onSelect, onQuit, onRefresh }
   }, [watchable.length, cursor]);
 
   useKeyboard((k) => {
-    if (k.name === "q" || k.name === "escape") return onQuit();
+    if (k.name === "escape" || k.name === "left") {
+      if (onBack) return onBack();
+      return onQuit();
+    }
+    if (k.name === "q") return onQuit();
     if (k.name === "r") return onRefresh();
     if (k.name === "up" || k.name === "k") setCursor((c) => Math.max(0, c - 1));
     if (k.name === "down" || k.name === "j") setCursor((c) => Math.min(watchable.length - 1, c + 1));
@@ -90,7 +97,7 @@ export function SessionList({ sessions, hostLabel, onSelect, onQuit, onRefresh }
 
       <box style={{ height: 1, backgroundColor: "#0b1220", paddingLeft: 1 }}>
         <text fg="#64748b">
-          ↑/↓ move · Enter watch · r refresh · q quit
+          ↑/↓ move · Enter watch · r refresh{onBack ? " · ← / Esc back" : ""} · q quit
         </text>
       </box>
     </box>
