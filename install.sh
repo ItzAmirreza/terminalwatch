@@ -30,9 +30,16 @@ ok()    { printf "\033[32m✓\033[0m  %s\n" "$*"; }
 
 # Detect run-from-checkout mode: if install.sh is sitting next to package.json
 # with our binary listed, we install from here instead of cloning anything.
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# When piped via `curl … | bash`, BASH_SOURCE is unset or "main"; treat that
+# as remote-mode and skip the local-checkout probe.
+SCRIPT_SRC="${BASH_SOURCE[0]:-}"
+SCRIPT_DIR=""
+if [ -n "$SCRIPT_SRC" ] && [ "$SCRIPT_SRC" != "main" ] && [ -e "$SCRIPT_SRC" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$SCRIPT_SRC")")" && pwd)"
+fi
 LOCAL_MODE=no
-if [ -f "$SCRIPT_DIR/package.json" ] && grep -q '"twatch"' "$SCRIPT_DIR/package.json" 2>/dev/null; then
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/package.json" ] \
+   && grep -q '"twatch"' "$SCRIPT_DIR/package.json" 2>/dev/null; then
   LOCAL_MODE=yes
 fi
 
