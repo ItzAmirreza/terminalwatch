@@ -11,7 +11,7 @@
 // first option in the picker UI.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 export type Target = {
@@ -48,7 +48,11 @@ const STORE_FILE = join(STORE_DIR, "targets.json");
 const SSH_CONFIG = join(homedir(), ".ssh", "config");
 
 export function listTargets(): Target[] {
-  const out: Target[] = [LOCAL_TARGET];
+  const out: Target[] = [];
+  // "Local" only makes sense on Linux — elsewhere it's a guaranteed
+  // dead-end (no /proc, no strace), so hide it instead of letting the
+  // user pick it and bounce off a "Linux-only" error at the watch step.
+  if (platform() === "linux") out.push(LOCAL_TARGET);
   out.push(...readSshConfig());
   out.push(...readStore());
   return out;
