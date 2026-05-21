@@ -111,9 +111,35 @@ export class SshTransport implements Transport {
 
   spawnPipe(argv: string[], opts: SpawnOptions = {}): ChildProcess {
     if (!this.opened) this.open();
-    const remote = quoteForRemoteShell(argv);
-    const sshArgs = ["-S", this.socket, ...this.extra, this.target, "--", remote];
-    return spawn("ssh", sshArgs, opts);
+    // Wrap the remote command so it dies cleanly when our local ssh
+    // exits. Without this, `ssh host 'sudo -n strace -p PID'` leaves
+    // an orphaned strace on the remote — local ssh dies, the strace
+    // sees its stdin/stdout close, but it keeps running, still
+    // attached as a ptrace tracer. The next attach attempt against
+    // the same PID then fails with EPERM ("already traced by …").
+    //
+    // The pattern below runs the real command in the background and
+    // blocks on `cat > /dev/null` reading from stdin. When ssh closes
+    // the channel (because we killed the local ssh), the remote
+    // stdin EOFs, cat exits, and the wrapper signals the bg command.
+    const inner = quoteForRemoteShell(argv);
+    const wrapped =
+      `${inner} & __tw_pid=$!; ` +
+      `cat > /dev/null; ` +
+      `kill -TERM $__tw_pid 2>/dev/null; ` +
+      `wait $__tw_pid 2>/dev/null`;
+    const sshArgs = ["-S", this.socket, ...this.extra, this.target, "--", wrapped];
+
+    // ssh's stdin must stay OPEN so the remote `cat > /dev/null` blocks
+    // (otherwise the wrapper would EOF immediately and kill strace
+    // before it could attach). Override stdio[0]="ignore" → "pipe".
+    const stdio: any[] = Array.isArray(opts.stdio)
+      ? [...opts.stdio]
+      : opts.stdio
+        ? [opts.stdio, opts.stdio, opts.stdio]
+        : ["pipe", "pipe", "pipe"];
+    if (stdio[0] === "ignore") stdio[0] = "pipe";
+    return spawn("ssh", sshArgs, { ...opts, stdio: stdio as any });
   }
 
   close() {
