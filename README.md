@@ -148,11 +148,6 @@ unchecked is planned next-up.
       yellow badge in the header reads `update vX.Y.Z available · press u`;
       pressing `u` runs `bun add -g terminalwatch@latest` and exits so
       you re-launch with the new version.
-- [x] **CI auto-publish** — `.github/workflows/publish.yml` checks
-      whether `package.json`'s version is newer than npm's on every
-      push to `main`. New version → `bun publish` runs with `NPM_TOKEN`.
-      Unchanged → silent skip.
-
 ### Shipped (v0.2 / v0.3)
 
 - [x] **Remote mode** — `twatch --remote user@host`. See "Use" above.
