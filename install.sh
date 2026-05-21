@@ -1,23 +1,33 @@
 #!/usr/bin/env bash
 # twatch one-line installer (Ubuntu / Debian).
 #
-# Remote install:
+# Remote install (the headline one-liner):
 #   curl -fsSL https://raw.githubusercontent.com/ItzAmirreza/terminalwatch/main/install.sh | bash
 #
-# Local install (from a checkout):
-#   ./install.sh
+# What it does, end-to-end:
+#   1. apt-installs `curl unzip strace` if any are missing
+#   2. installs Bun (https://bun.sh) if `bun` isn't on $PATH already
+#   3. `bun i -g terminalwatch`  (or the version pinned in $TWATCH_VERSION)
+#   4. drops a /usr/local/bin/twatch shim so the command is on PATH for
+#      every shell on the box, regardless of whether the caller's PATH
+#      includes ~/.bun/bin
+#
+# This routes everyone through the npm-installed package, so the
+# in-app auto-updater can do `bun add -g terminalwatch@latest`
+# without us having to maintain a separate git-clone topology.
+#
+# Local install (from a checkout) is still supported — run ./install.sh
+# from inside the repo and it `bun link`s the checkout instead of
+# fetching from npm.
 #
 # Env overrides:
-#   TWATCH_REPO       git URL (default: github.com/ItzAmirreza/terminalwatch.git)
-#   TWATCH_BRANCH     branch / ref (default: main)
-#   TWATCH_DIR        where to put the source (default: ~/.local/share/twatch)
+#   TWATCH_VERSION    pin a specific npm version (default: latest)
 #   TWATCH_BIN_DIR    where to write the launcher (default: /usr/local/bin)
 
 set -euo pipefail
 
-REPO_URL="${TWATCH_REPO:-https://github.com/ItzAmirreza/terminalwatch.git}"
-BRANCH="${TWATCH_BRANCH:-main}"
-INSTALL_DIR="${TWATCH_DIR:-$HOME/.local/share/twatch}"
+PKG_NAME="terminalwatch"
+PKG_SPEC="${PKG_NAME}@${TWATCH_VERSION:-latest}"
 BIN_DIR="${TWATCH_BIN_DIR:-/usr/local/bin}"
 BIN_TARGET="$BIN_DIR/twatch"
 
@@ -28,10 +38,9 @@ ok()    { printf "\033[32m✓\033[0m  %s\n" "$*"; }
 
 [ "$(uname -s)" = "Linux" ] || fail "twatch requires Linux (uses /proc + strace)."
 
-# Detect run-from-checkout mode: if install.sh is sitting next to package.json
-# with our binary listed, we install from here instead of cloning anything.
-# When piped via `curl … | bash`, BASH_SOURCE is unset or "main"; treat that
-# as remote-mode and skip the local-checkout probe.
+# Detect run-from-checkout mode: when install.sh sits next to a
+# package.json whose bin field claims `twatch`. We use `bun link` so the
+# local source becomes the globally-installed copy and stays editable.
 SCRIPT_SRC="${BASH_SOURCE[0]:-}"
 SCRIPT_DIR=""
 if [ -n "$SCRIPT_SRC" ] && [ "$SCRIPT_SRC" != "main" ] && [ -e "$SCRIPT_SRC" ]; then
@@ -48,7 +57,6 @@ pkgs=()
 command -v curl   >/dev/null || pkgs+=(curl)
 command -v unzip  >/dev/null || pkgs+=(unzip)
 command -v strace >/dev/null || pkgs+=(strace)
-[ "$LOCAL_MODE" = "no" ] && ! command -v git >/dev/null && pkgs+=(git)
 
 if [ "${#pkgs[@]}" -gt 0 ]; then
   if ! command -v apt-get >/dev/null; then
@@ -59,7 +67,7 @@ if [ "${#pkgs[@]}" -gt 0 ]; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${pkgs[@]}"
 fi
 
-# 2. bun
+# 2. Bun
 if ! command -v bun >/dev/null && [ ! -x "$HOME/.bun/bin/bun" ]; then
   say "installing bun"
   curl -fsSL https://bun.sh/install | bash >/dev/null
@@ -69,51 +77,58 @@ BUN="$(command -v bun || true)"
 [ -x "$BUN" ] || fail "bun not found after install attempt."
 ok "bun: $($BUN --version) at $BUN"
 
-# 3. source
+# 3. terminalwatch — same `bun add -g` topology in both modes; in local
+#    mode we feed bun the filesystem path of the checkout instead of the
+#    npm spec, so the in-app `u` upgrader still works (`bun add -g
+#    terminalwatch@latest` will fetch from npm next time, transparently
+#    replacing the local install).
 if [ "$LOCAL_MODE" = "yes" ]; then
-  if [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
-    say "copying local checkout to $INSTALL_DIR"
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    rm -rf "$INSTALL_DIR"
-    cp -R "$SCRIPT_DIR" "$INSTALL_DIR"
-  else
-    say "using in-place checkout at $INSTALL_DIR"
-  fi
+  say "installing from local checkout at $SCRIPT_DIR (bun add -g .)"
+  ( cd "$SCRIPT_DIR" && "$BUN" install --silent )
+  "$BUN" add -g "$SCRIPT_DIR"
 else
-  if [ -d "$INSTALL_DIR/.git" ]; then
-    say "updating existing checkout at $INSTALL_DIR"
-    git -C "$INSTALL_DIR" fetch --depth 1 origin "$BRANCH"
-    git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
-  else
-    say "cloning $REPO_URL → $INSTALL_DIR"
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    git clone --depth 1 -b "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
-  fi
+  say "installing $PKG_SPEC from npm (bun i -g)"
+  "$BUN" add -g "$PKG_SPEC"
 fi
 
-# 4. JS deps
-say "installing dependencies (bun install)"
-( cd "$INSTALL_DIR" && "$BUN" install --silent )
+# 4. resolve where bun put the launcher
+BUN_BIN="$(dirname "$BUN")"
+USER_TWATCH="$BUN_BIN/twatch"
+[ -x "$USER_TWATCH" ] || fail "bun installed terminalwatch but didn't drop a twatch binary at $USER_TWATCH"
+ok "bun bin: $USER_TWATCH"
 
-# 5. system launcher
+# 5. system-wide launcher — a tiny shim so /usr/local/bin/twatch resolves
+#    regardless of $PATH ordering (cron, non-login shells, ssh -c, etc.)
 say "installing launcher → $BIN_TARGET"
 if ! sudo -n true 2>/dev/null && [ ! -w "$BIN_DIR" ]; then
   warn "sudo will prompt for your password to write $BIN_TARGET"
 fi
 sudo tee "$BIN_TARGET" >/dev/null <<EOF
 #!/usr/bin/env bash
-# auto-generated by twatch installer
-exec "$BUN" run "$INSTALL_DIR/src/index.tsx" "\$@"
+# auto-generated by twatch installer — forwards to the bun-managed
+# install so \`u\` in-app upgrades land here too.
+exec "$USER_TWATCH" "\$@"
 EOF
 sudo chmod +x "$BIN_TARGET"
 
 # Refresh shell hash so 'twatch' is callable in the *current* shell too.
 hash -r 2>/dev/null || true
 
+# Detect and warn about any stale git-clone style install left over from
+# install.sh versions < 0.4.1.
+OLD_DIR="$HOME/.local/share/twatch"
+if [ -d "$OLD_DIR" ]; then
+  warn "leftover git-clone install at $OLD_DIR — safe to delete:"
+  echo "    rm -rf $OLD_DIR"
+fi
+
+INSTALLED_VERSION="$("$USER_TWATCH" --version 2>/dev/null || true)"
+
 echo
 ok "twatch installed."
-echo "    run:     twatch"
-echo "    source:  $INSTALL_DIR"
-echo "    bun:     $BUN"
+echo "    run:           twatch"
+echo "    package:       $PKG_NAME${INSTALLED_VERSION:+ ($INSTALLED_VERSION)}"
+echo "    bun:           $BUN"
+echo "    update later:  press \`u\` in the TUI, or \`bun add -g $PKG_NAME@latest\`"
 echo
 warn "twatch invokes sudo strace internally; make sure this user has sudo (passwordless or interactive)."

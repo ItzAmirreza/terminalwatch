@@ -11,7 +11,7 @@ import { fetchHistory, renderPreamble } from "./history.ts";
 import { formatGeo, lookup, lookupCached } from "./geoip.ts";
 import { LocalTransport, SshTransport, type Transport } from "./transport.ts";
 import { listTargets, LOCAL_TARGET, targetToSsh, type Target } from "./targets.ts";
-import { checkForUpdate, runSelfUpdate, type UpdateState } from "./updater.ts";
+import { checkForUpdate, getInstalledVersion, runSelfUpdate, type UpdateState } from "./updater.ts";
 
 const MOCK = process.env.TWATCH_MOCK === "1" || process.argv.includes("--mock");
 
@@ -44,6 +44,9 @@ function parseCli(): Cli {
       sshExtra.push("-o", v);
     } else if (a === "--help" || a === "-h") {
       printHelp();
+      process.exit(0);
+    } else if (a === "--version" || a === "-v") {
+      process.stdout.write(`twatch ${getInstalledVersion()}\n`);
       process.exit(0);
     } else if (a === "--mock") {
       // handled via MOCK; ignore here
@@ -80,6 +83,8 @@ function printHelp() {
       "  -p PORT                   SSH port (forwarded to ssh -p)",
       "  -o OPT                    extra ssh -o option (repeatable)",
       "  --mock                    fake data for UI dev on non-Linux hosts",
+      "  --version, -v             print version and exit",
+      "  --help, -h                this message",
       "",
       "Keys (targets):    ↑/↓ move · Enter open · r refresh · q quit",
       "Keys (sessions):   ↑/↓ move · Enter watch · r refresh · Esc back · q quit",

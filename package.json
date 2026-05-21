@@ -1,6 +1,6 @@
 {
   "name": "terminalwatch",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Live-mirror any logged-in user's terminal on a Linux server. Sysadmin TUI built with OpenTUI.",
   "type": "module",
   "bin": {
