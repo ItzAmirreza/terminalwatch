@@ -1,6 +1,6 @@
 {
   "name": "terminalwatch",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Live-mirror any logged-in user's terminal on a Linux server. Sysadmin TUI built with OpenTUI.",
   "type": "module",
   "bin": {
@@ -43,7 +43,6 @@
   },
   "author": "ItzAmirreza",
   "license": "MIT",
-  "os": ["linux"],
   "engines": {
     "bun": ">=1.0.0"
   },
