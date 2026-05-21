@@ -30,11 +30,16 @@ export class FdResolver {
     this.useSudoFallback = useSudoFallback;
   }
 
-  isTargetTty(pid: number, fd: number): boolean {
+  // `knownLink` lets the caller skip the /proc/PID/fd/N readlink. The
+  // strace-y output gives us the fd→path resolution inline in every
+  // write() line, which is much faster than a separate readlink (esp.
+  // over SSH) AND survives the trace target exiting before our lookup
+  // would have run.
+  isTargetTty(pid: number, fd: number, knownLink?: string): boolean {
     const key = `${pid}:${fd}`;
     const cached = this.fdCache.get(key);
     if (cached !== undefined) return cached;
-    const link = this.readlink(pid, fd);
+    const link = knownLink ?? this.readlink(pid, fd);
     let resolved = false;
     if (link === this.targetPath) {
       resolved = true;

@@ -76,6 +76,7 @@ export function startWatch(opts: WatchOptions): WatchHandle {
   } else {
     const straceArgs = [
       "-f",
+      "-y",                  // decode fd→path inline: `write(1</dev/pts/0>, …)`
       "-p", String(opts.shellPid),
       "-e", "trace=write",
       "-e", "signal=none",
@@ -113,15 +114,37 @@ export function startWatch(opts: WatchOptions): WatchHandle {
   };
   stdin.on("data", onData);
 
-  function finish(r: { reason: "user" | "exit" | "error"; code?: number; err?: string }) {
+  async function finish(r: { reason: "user" | "exit" | "error"; code?: number; err?: string }) {
     if (detached) return;
     detached = true;
     stdin.removeListener("data", onData);
     if (stdin.isTTY) stdin.setRawMode(wasRaw);
-    if (child && !child.killed) {
-      try { child.kill("SIGTERM"); } catch {}
-    }
     if (mockAbort) mockAbort.abort();
+
+    // Graceful shutdown of the spawned child (especially important for
+    // SshTransport): close stdin first so the remote wrapper's
+    // `cat > /dev/null` hits EOF and runs its cleanup (kill strace,
+    // wait for it to detach, exit). The local ssh then exits naturally
+    // after the remote does, so `child.exit` fires only AFTER the
+    // remote ptrace tracer is gone. Without this, an immediate
+    // re-attach against the same target PID hits EPERM because the
+    // previous strace is still attached.
+    if (child) {
+      try { child.stdin?.end(); } catch {}
+      await new Promise<void>((res) => {
+        if (child!.exitCode !== null || child!.signalCode !== null) return res();
+        let done = false;
+        const finishOnce = () => { if (!done) { done = true; res(); } };
+        child!.once("exit", finishOnce);
+        // Escalate if the wrapper doesn't tear down on its own. 1.5s
+        // is comfortably more than a clean detach roundtrip even on
+        // sluggish links; SIGKILL at 3s; absolute give-up at 5s so a
+        // dead-network host can't pin the UI forever.
+        setTimeout(() => { if (!done && child && !child.killed) { try { child.kill("SIGTERM"); } catch {} } }, 1500);
+        setTimeout(() => { if (!done && child && !child.killed) { try { child.kill("SIGKILL"); } catch {} } }, 3000);
+        setTimeout(finishOnce, 5000);
+      });
+    }
     resolve(r);
   }
 
@@ -198,11 +221,26 @@ class StraceLineParser {
     i += "write(".length;
     const comma = line.indexOf(",", i);
     if (comma < 0) return;
-    const fd = parseInt(line.slice(i, comma).trim(), 10);
+
+    // With strace -y the fd is rendered as `N<path>`. Extract both the
+    // integer fd and the inline path so we don't have to readlink
+    // /proc/PID/fd/N over SSH — that race was losing all output from
+    // short-lived processes (cat, ls, echo …) which had exited by the
+    // time the readlink reached the box.
+    let fdEnd = i;
+    while (fdEnd < comma && line.charCodeAt(fdEnd) >= 0x30 && line.charCodeAt(fdEnd) <= 0x39) fdEnd++;
+    const fd = parseInt(line.slice(i, fdEnd), 10);
+    let knownLink: string | undefined;
+    if (line.charCodeAt(fdEnd) === 0x3c /* < */) {
+      const lt = fdEnd + 1;
+      const gt = line.indexOf(">", lt);
+      if (gt > lt && gt < comma) knownLink = line.slice(lt, gt);
+    }
+
     // Don't filter on fd number — sudo's I/O monitor relays via fd 8
     // (its dup of /dev/tty), not fd 1/2. The link-based check is what
     // decides whether this write is actually user-visible.
-    if (!this.resolver.isTargetTty(pid, fd)) return;
+    if (!this.resolver.isTargetTty(pid, fd, knownLink)) return;
     let j = comma + 1;
     while (j < line.length && line.charCodeAt(j) === 0x20) j++;
     if (line.charCodeAt(j) !== 0x22 /* " */) return;
