@@ -17,6 +17,11 @@
 import { readFileSync, readlinkSync } from "node:fs";
 import type { Transport } from "./transport.ts";
 
+// Cap the caches so a long watch over a busy shell (many short-lived PIDs)
+// can't grow them without bound. When full we drop the whole map — these are
+// pure lookups, so re-resolving is always correct, just momentarily slower.
+const CACHE_CAP = 4096;
+
 export class FdResolver {
   private fdCache = new Map<string, boolean>();
   private cttyCache = new Map<number, string | null>();
@@ -30,24 +35,36 @@ export class FdResolver {
     this.useSudoFallback = useSudoFallback;
   }
 
-  // `knownLink` lets the caller skip the /proc/PID/fd/N readlink. The
-  // strace-y output gives us the fd→path resolution inline in every
-  // write() line, which is much faster than a separate readlink (esp.
-  // over SSH) AND survives the trace target exiting before our lookup
-  // would have run.
+  // Decide whether a write() strace attributed to (pid, fd) actually lands on
+  // the target pts.
+  //
+  // `knownLink` is the fd→path strace prints inline with `-y` (e.g.
+  // `write(1</dev/pts/0>, …)`). When present it's authoritative for THIS
+  // write, so we classify from it directly and do NOT consult the pid:fd
+  // cache: that cache goes stale under PID reuse or an fd being reopened to a
+  // different target mid-watch, which would misroute another process's pipe
+  // writes onto the operator's terminal. The link is cheap (a string compare,
+  // plus an occasional cached ctty read), so there's nothing to cache anyway.
+  //
+  // Only the fallback path (no `-y`, e.g. the older test harness) caches the
+  // readlink result, since that readlink is the expensive part.
   isTargetTty(pid: number, fd: number, knownLink?: string): boolean {
+    if (knownLink !== undefined) return this.classify(pid, knownLink);
+
     const key = `${pid}:${fd}`;
     const cached = this.fdCache.get(key);
     if (cached !== undefined) return cached;
-    const link = knownLink ?? this.readlink(pid, fd);
-    let resolved = false;
-    if (link === this.targetPath) {
-      resolved = true;
-    } else if (link === "/dev/tty") {
-      resolved = this.controllingTty(pid) === this.targetPath;
-    }
+    const link = this.readlink(pid, fd);
+    const resolved = link === null ? false : this.classify(pid, link);
+    if (this.fdCache.size >= CACHE_CAP) this.fdCache.clear();
     this.fdCache.set(key, resolved);
     return resolved;
+  }
+
+  private classify(pid: number, link: string): boolean {
+    if (link === this.targetPath) return true;
+    if (link === "/dev/tty") return this.controllingTty(pid) === this.targetPath;
+    return false;
   }
 
   private readlink(pid: number, fd: number): string | null {
@@ -72,6 +89,7 @@ export class FdResolver {
     const cached = this.cttyCache.get(pid);
     if (cached !== undefined) return cached;
     const path = this.readStatCtty(pid);
+    if (this.cttyCache.size >= CACHE_CAP) this.cttyCache.clear();
     this.cttyCache.set(pid, path);
     return path;
   }

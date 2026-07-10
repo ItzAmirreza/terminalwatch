@@ -1,6 +1,13 @@
 // Session discovery: list logged-in PTY sessions on the host pointed to
 // by the Transport. For LocalTransport this reads the operator's own
 // kernel; for SshTransport it shells out to the remote box.
+//
+// Two orchestrators are exported:
+//   - listSessions()      — synchronous; used by the dev smoke tests.
+//   - listSessionsAsync() — non-blocking; used by the live TUI so an SSH
+//                           round-trip on the 3s refresh can't freeze the
+//                           OpenTUI render loop.
+// They share the parse/format helpers below so they can't drift apart.
 
 import { statSync } from "node:fs";
 import { hostname, platform, userInfo } from "node:os";
@@ -29,11 +36,38 @@ export function listSessions(transport: Transport): Session[] {
   if (MOCK) return mockSessions();
   if (transport.isLocal() && !isLinux()) return [];
 
-  const who = runWho(transport);
+  const who = parseWho(runText(transport.execCapture(["who"])));
   const selfTty = transport.isLocal() ? selfTtyName(transport) : null;
-  const psRows = runPs(transport);
-  const idleMap = runIdle(transport, who.map((w) => `/dev/${w.tty}`));
+  const psRows = parsePs(runText(transport.execCapture(["ps", "-e", "-o", "pid=,tty=,stat=,comm="])));
+  const idleMap = idleSync(transport, who.map((w) => `/dev/${w.tty}`));
 
+  return assembleSessions(who, psRows, idleMap, selfTty);
+}
+
+export async function listSessionsAsync(transport: Transport): Promise<Session[]> {
+  if (MOCK) return mockSessions();
+  if (transport.isLocal() && !isLinux()) return [];
+
+  const [whoRes, psRes] = await Promise.all([
+    transport.execCaptureAsync(["who"]),
+    transport.execCaptureAsync(["ps", "-e", "-o", "pid=,tty=,stat=,comm="]),
+  ]);
+  const who = parseWho(runText(whoRes));
+  const psRows = parsePs(runText(psRes));
+  // selfTty resolution is local-only and hits SSH_TTY / `tty` (instant), so
+  // keeping it synchronous costs nothing on the render path.
+  const selfTty = transport.isLocal() ? selfTtyName(transport) : null;
+  const idleMap = await idleAsync(transport, who.map((w) => `/dev/${w.tty}`));
+
+  return assembleSessions(who, psRows, idleMap, selfTty);
+}
+
+function assembleSessions(
+  who: WhoRow[],
+  psRows: PsRow[],
+  idleMap: Record<string, string>,
+  selfTty: string | null,
+): Session[] {
   const sessions: Session[] = [];
   for (const row of who) {
     const ttyDev = `/dev/${row.tty}`;
@@ -63,11 +97,14 @@ export function hostLabel(transport: Transport): string {
 
 type WhoRow = { user: string; tty: string; loginAt: string; from: string };
 
-function runWho(transport: Transport): WhoRow[] {
-  const r = transport.execCapture(["who"]);
-  if (r.status !== 0) return [];
+// Return stdout only when the command succeeded (else "" → empty parse).
+function runText(r: { status: number; stdout: string }): string {
+  return r.status === 0 ? r.stdout : "";
+}
+
+function parseWho(stdout: string): WhoRow[] {
   const rows: WhoRow[] = [];
-  for (const line of r.stdout.split("\n")) {
+  for (const line of stdout.split("\n")) {
     if (!line.trim()) continue;
     // who output columns: USER TTY LOGINDATE LOGINTIME (FROM)
     // e.g. "azureuser pts/0        2026-05-20 20:35 (77.119.164.236)"
@@ -85,11 +122,9 @@ function runWho(transport: Transport): WhoRow[] {
 
 type PsRow = { pid: number; tty: string; stat: string; comm: string };
 
-function runPs(transport: Transport): PsRow[] {
-  const r = transport.execCapture(["ps", "-e", "-o", "pid=,tty=,stat=,comm="]);
-  if (r.status !== 0) return [];
+function parsePs(stdout: string): PsRow[] {
   const rows: PsRow[] = [];
-  for (const raw of r.stdout.split("\n")) {
+  for (const raw of stdout.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
     const m = line.match(/^(\d+)\s+(\S+)\s+(\S+)\s+(.+)$/);
@@ -145,26 +180,41 @@ function selfTtyName(transport: Transport): string | null {
 // Compute per-tty idle time. For LocalTransport we stat() directly so it
 // stays a single VFS hit; for SshTransport we fall back to `stat -c %X`
 // in one batched call so we don't pay the SSH round-trip per pts.
-function runIdle(transport: Transport, ttyDevs: string[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (transport.isLocal()) {
-    for (const dev of ttyDevs) {
-      try {
-        const s = statSync(dev);
-        out[dev] = formatIdle(Date.now() - s.atimeMs);
-      } catch {
-        out[dev] = "?";
-      }
-    }
-    return out;
-  }
-  if (ttyDevs.length === 0) return out;
+function idleSync(transport: Transport, ttyDevs: string[]): Record<string, string> {
+  if (transport.isLocal()) return idleLocal(ttyDevs);
+  if (ttyDevs.length === 0) return {};
   const r = transport.execCapture(["stat", "-c", "%n %X", ...ttyDevs]);
-  if (r.status !== 0) {
+  return parseStatIdle(r.status === 0 ? r.stdout : null, ttyDevs);
+}
+
+async function idleAsync(transport: Transport, ttyDevs: string[]): Promise<Record<string, string>> {
+  if (transport.isLocal()) return idleLocal(ttyDevs);
+  if (ttyDevs.length === 0) return {};
+  const r = await transport.execCaptureAsync(["stat", "-c", "%n %X", ...ttyDevs]);
+  return parseStatIdle(r.status === 0 ? r.stdout : null, ttyDevs);
+}
+
+function idleLocal(ttyDevs: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const dev of ttyDevs) {
+    try {
+      out[dev] = formatIdle(Date.now() - statSync(dev).atimeMs);
+    } catch {
+      out[dev] = "?";
+    }
+  }
+  return out;
+}
+
+// Parse `stat -c "%n %X"` output; a null stdout (command failed) marks every
+// requested device as unknown.
+function parseStatIdle(stdout: string | null, ttyDevs: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (stdout === null) {
     for (const dev of ttyDevs) out[dev] = "?";
     return out;
   }
-  for (const line of r.stdout.split("\n")) {
+  for (const line of stdout.split("\n")) {
     const parts = line.trim().split(/\s+/);
     if (parts.length < 2) continue;
     const [dev, atimeStr] = parts;

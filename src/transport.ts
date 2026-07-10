@@ -19,7 +19,7 @@ import {
   type ChildProcess,
   type SpawnOptions,
 } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,12 +30,35 @@ export interface Transport {
   isLocal(): boolean;
   /** Short label for UI ("local" or "user@host"). */
   label(): string;
-  /** Run a command, wait for exit, capture stdout/stderr. */
+  /**
+   * Run a command, wait for exit, capture stdout/stderr. This BLOCKS the
+   * event loop for the whole round-trip, so only call it from flows that
+   * are already synchronous and off the render path (e.g. the fd filter's
+   * readlink fallback, which runs while the TUI is suspended).
+   */
   execCapture(argv: string[]): CaptureResult;
+  /**
+   * Non-blocking sibling of execCapture. Prefer this from anything that
+   * runs while the TUI is live (session refresh, history): a blocking
+   * spawnSync would stall the OpenTUI redraw for the full SSH round-trip.
+   */
+  execCaptureAsync(argv: string[]): Promise<CaptureResult>;
   /** Spawn a long-running command, return the child for piping. */
   spawnPipe(argv: string[], opts?: SpawnOptions): ChildProcess;
   /** Tear down any persistent state (e.g. the SSH ControlMaster). */
   close(): void;
+}
+
+// Collect stdout/stderr from an already-spawned child into a CaptureResult.
+function captureChild(child: ChildProcess): Promise<CaptureResult> {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
+    child.stderr?.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
+    child.on("error", (e) => resolve({ status: -1, stdout, stderr: stderr || String(e) }));
+    child.on("close", (code) => resolve({ status: code ?? -1, stdout, stderr }));
+  });
 }
 
 export class LocalTransport implements Transport {
@@ -46,6 +69,11 @@ export class LocalTransport implements Transport {
     if (!cmd) return { status: -1, stdout: "", stderr: "empty argv" };
     const r = spawnSync(cmd, args, { encoding: "utf8" });
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+  execCaptureAsync(argv: string[]): Promise<CaptureResult> {
+    const [cmd, ...args] = argv;
+    if (!cmd) return Promise.resolve({ status: -1, stdout: "", stderr: "empty argv" });
+    return captureChild(spawn(cmd, args));
   }
   spawnPipe(argv: string[], opts: SpawnOptions = {}): ChildProcess {
     const [cmd, ...args] = argv;
@@ -65,15 +93,27 @@ export type SshOpts = {
 
 export class SshTransport implements Transport {
   private readonly socket: string;
+  private readonly dir: string;
   private readonly target: string;
   private readonly extra: string[];
   private opened = false;
+  private cleaned = false;
 
   constructor(opts: SshOpts) {
+    // A destination beginning with "-" would be swallowed by ssh's own
+    // option parser (e.g. "-oProxyCommand=…"), turning an untrusted host
+    // string into arbitrary ssh options / command execution. Refuse it.
+    if (opts.target.startsWith("-")) {
+      throw new Error(`refusing ssh destination that looks like a flag: "${opts.target}"`);
+    }
     this.target = opts.target;
     this.extra = opts.extraArgs;
-    const dir = mkdtempSync(join(tmpdir(), "twatch-ssh-"));
-    this.socket = join(dir, "ctl.sock");
+    this.dir = mkdtempSync(join(tmpdir(), "twatch-ssh-"));
+    this.socket = join(this.dir, "ctl.sock");
+    // Backstop: if the process dies without a clean close() (crash,
+    // SIGKILL), at least remove the temp dir holding the control socket.
+    // rmSync is synchronous so it is safe inside an 'exit' handler.
+    process.once("exit", () => this.removeDir());
   }
 
   isLocal() { return false; }
@@ -107,6 +147,21 @@ export class SshTransport implements Transport {
     const sshArgs = ["-S", this.socket, ...this.extra, this.target, "--", remote];
     const r = spawnSync("ssh", sshArgs, { encoding: "utf8" });
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  execCaptureAsync(argv: string[]): Promise<CaptureResult> {
+    if (!this.opened) {
+      // open() is a one-time synchronous handshake; if it fails, surface
+      // that as a failed capture rather than rejecting the promise.
+      try {
+        this.open();
+      } catch (e: any) {
+        return Promise.resolve({ status: -1, stdout: "", stderr: String(e?.message ?? e) });
+      }
+    }
+    const remote = quoteForRemoteShell(argv);
+    const sshArgs = ["-S", this.socket, ...this.extra, this.target, "--", remote];
+    return captureChild(spawn("ssh", sshArgs));
   }
 
   spawnPipe(argv: string[], opts: SpawnOptions = {}): ChildProcess {
@@ -143,12 +198,20 @@ export class SshTransport implements Transport {
   }
 
   close() {
-    if (!this.opened) return;
-    spawnSync("ssh", ["-S", this.socket, "-O", "exit", ...this.extra, this.target], {
-      encoding: "utf8",
-      stdio: "ignore",
-    });
-    this.opened = false;
+    if (this.opened) {
+      spawnSync("ssh", ["-S", this.socket, "-O", "exit", ...this.extra, this.target], {
+        encoding: "utf8",
+        stdio: "ignore",
+      });
+      this.opened = false;
+    }
+    this.removeDir();
+  }
+
+  private removeDir() {
+    if (this.cleaned) return;
+    this.cleaned = true;
+    try { rmSync(this.dir, { recursive: true, force: true }); } catch {}
   }
 }
 

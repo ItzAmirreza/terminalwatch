@@ -1,11 +1,11 @@
 import { createCliRenderer } from "@opentui/core";
 import { createRoot, useRenderer } from "@opentui/react";
 import { userInfo } from "node:os";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionList } from "./ui/SessionList.tsx";
 import { TargetsList } from "./ui/TargetsList.tsx";
 import { AddTargetForm } from "./ui/AddTargetForm.tsx";
-import { hostLabel, isLinux, listSessions, type Session } from "./sessions.ts";
+import { hostLabel, isLinux, listSessionsAsync, type Session } from "./sessions.ts";
 import { startWatch, demoMockStream } from "./watch.ts";
 import { fetchHistory, renderPreamble } from "./history.ts";
 import { formatGeo, lookup, lookupCached } from "./geoip.ts";
@@ -29,6 +29,9 @@ function parseCli(): Cli {
     if (a === "--remote" || a === "-r") {
       const v = argv[++i];
       if (!v) bail("--remote requires a user@host argument");
+      // A destination starting with "-" would be parsed by ssh as an
+      // option (e.g. "-oProxyCommand=…"), not a host — refuse it.
+      if (v.startsWith("-")) bail(`--remote value looks like an ssh flag, refusing: ${v}`);
       remoteTarget = v;
     } else if (a === "-i") {
       const v = argv[++i];
@@ -148,8 +151,9 @@ function App() {
     }
     const ssh = targetToSsh(t);
     if (!ssh) return;
-    const transport = new SshTransport({ target: ssh.target, extraArgs: ssh.extraArgs });
+    let transport: SshTransport;
     try {
+      transport = new SshTransport({ target: ssh.target, extraArgs: ssh.extraArgs });
       transport.open();
     } catch (e: any) {
       setBanner(`ssh ${ssh.target} failed: ${String(e?.message ?? e).split("\n")[0]}`);
@@ -213,19 +217,26 @@ function SessionsScreen(props: {
 }) {
   const renderer = useRenderer();
   const { transport, target, onQuit, onBack, canGoBack, update, onUpdate } = props;
-  const [sessions, setSessions] = useState<Session[]>(() => listSessions(transport));
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  // Guards for the async refresh: skip a tick if the previous one is still
+  // in flight (SSH round-trips can outlast the 3s interval), and never call
+  // setState after this screen has unmounted.
+  const inFlight = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const refresh = useCallback(() => {
-    try {
-      setSessions(listSessions(transport));
-      setErr(null);
-    } catch (e: any) {
-      setErr(String(e?.message ?? e));
-    }
+    if (inFlight.current) return;
+    inFlight.current = true;
+    listSessionsAsync(transport)
+      .then((s) => { if (mounted.current) { setSessions(s); setErr(null); } })
+      .catch((e: any) => { if (mounted.current) setErr(String(e?.message ?? e)); })
+      .finally(() => { inFlight.current = false; });
   }, [transport]);
 
   useEffect(() => {
+    refresh();
     const t = setInterval(refresh, 3000);
     return () => clearInterval(t);
   }, [refresh]);

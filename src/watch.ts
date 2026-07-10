@@ -80,7 +80,11 @@ export function startWatch(opts: WatchOptions): WatchHandle {
       "-p", String(opts.shellPid),
       "-e", "trace=write",
       "-e", "signal=none",
-      "-s", "65535",
+      // Cap on how much of each write()'s buffer strace prints. 1 MiB is far
+      // above any realistic single tty write (the pty line-discipline buffer
+      // is tens of KiB), so terminal output is captured whole; only a single
+      // write() larger than this would lose its tail.
+      "-s", "1048576",
       "-qq",
     ];
     const argv = opts.useSudo === false
@@ -92,11 +96,24 @@ export function startWatch(opts: WatchOptions): WatchHandle {
       opts.shellPid,
       resolver!,
       (bytes) => out.write(bytes),
-      (errLine) => out.write(`\x1b[31m${errLine}\x1b[0m\r\n`),
+      (errLine, fatal) => {
+        out.write(`\x1b[31m${errLine}\x1b[0m\r\n`);
+        // A fatal diagnostic (sudo auth failure, ptrace EPERM, …) means no
+        // output is ever coming. Tear down and surface it as an error so the
+        // session screen shows a message — otherwise the operator stares at a
+        // blank mirror: locally the child would exit silently, and over SSH
+        // the wrapper's `cat > /dev/null` would keep the channel open forever.
+        if (fatal && !detached) finish({ reason: "error", err: errLine.replace(/\s+/g, " ").trim() });
+      },
     );
     child.stderr!.on("data", (buf: Buffer) => parser.feed(buf));
     child.on("exit", (code) => {
-      if (!detached) finish({ reason: "exit", code: code ?? 0 });
+      if (detached) return;
+      // A clean detach kills the child ourselves (sets detached first), so
+      // reaching here means strace/sudo died on its own. Non-zero is a
+      // failure (sudo denied, ptrace refused); 0 is the traced shell exiting.
+      if (code && code !== 0) finish({ reason: "error", err: `strace exited with status ${code}` });
+      else finish({ reason: "exit", code: code ?? 0 });
     });
     child.on("error", (err) => {
       if (!detached) finish({ reason: "error", err: err.message });
@@ -108,16 +125,15 @@ export function startWatch(opts: WatchOptions): WatchHandle {
   const wasRaw = stdin.isTTY ? stdin.isRaw : false;
   if (stdin.isTTY) stdin.setRawMode(true);
   stdin.resume();
-  const detachDetector = new DetachDetector();
-  const onData = (buf: Buffer) => {
-    if (detachDetector.shouldDetach(buf)) finish({ reason: "user" });
-  };
+  const detachDetector = new DetachDetector(() => finish({ reason: "user" }));
+  const onData = (buf: Buffer) => detachDetector.feed(buf);
   stdin.on("data", onData);
 
   async function finish(r: { reason: "user" | "exit" | "error"; code?: number; err?: string }) {
     if (detached) return;
     detached = true;
     stdin.removeListener("data", onData);
+    detachDetector.dispose();
     if (stdin.isTTY) stdin.setRawMode(wasRaw);
     if (mockAbort) mockAbort.abort();
 
@@ -131,6 +147,15 @@ export function startWatch(opts: WatchOptions): WatchHandle {
     // previous strace is still attached.
     if (child) {
       try { child.stdin?.end(); } catch {}
+      // A LOCAL strace has no remote wrapper watching stdin, so closing it
+      // above does nothing — signal the tracer directly and immediately.
+      // strace detaches from the target on SIGTERM; a later SIGKILL is also
+      // safe because the kernel auto-detaches ptrace when the tracer dies.
+      // This closes the ~1.5s window where the old strace is still attached
+      // and an immediate re-attach to the same PID could race on EPERM.
+      if (opts.transport.isLocal()) {
+        try { child.kill("SIGTERM"); } catch {}
+      }
       await new Promise<void>((res) => {
         if (child!.exitCode !== null || child!.signalCode !== null) return res();
         let done = false;
@@ -156,23 +181,57 @@ export function startWatch(opts: WatchOptions): WatchHandle {
 
 // Detect detach intent from raw stdin bytes:
 //   - Left Arrow: ESC [ D  (normal mode)  or  ESC O D  (application mode)
-//   - Esc (bare): ESC followed by no more bytes in this read
+//   - Esc (bare): ESC with no continuation
 //   - Ctrl+C:    0x03
 //   - Ctrl+]:    0x1d  (legacy from v1)
-class DetachDetector {
-  shouldDetach(buf: Buffer): boolean {
-    for (let i = 0; i < buf.length; i++) {
+//
+// A lone trailing ESC is ambiguous: it can be a real Esc press OR the first
+// byte of an escape sequence (arrow / F-key) that got split across two stdin
+// reads. So when a buffer ends in a bare ESC we don't decide immediately — we
+// wait a short grace period. If a continuation arrives first it's a sequence;
+// if the timer fires first it was a real Esc. This kills the spurious detach
+// that fired when an arrow-key sequence happened to split on the ESC boundary.
+export class DetachDetector {
+  private pendingEsc = false;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private readonly onDetach: () => void,
+    private readonly escGraceMs = 50,
+  ) {}
+
+  feed(buf: Buffer): void {
+    let i = 0;
+    if (this.pendingEsc) {
+      this.clearTimer();
+      this.pendingEsc = false;
+      const b0 = buf[0];
+      if (b0 === 0x5b || b0 === 0x4f) {
+        // Continuation of a CSI/SS3 sequence begun by the pending ESC.
+        if (buf[1] === 0x44) return this.onDetach(); // ESC [ D / ESC O D = left arrow
+        // Skip to the sequence's final byte, then scan the remainder normally.
+        i = 1;
+        while (i < buf.length) {
+          const c = buf[i]!;
+          i++;
+          if (c >= 0x40 && c <= 0x7e) break;
+        }
+      } else {
+        // Nothing continued the ESC → it was a real Esc press.
+        return this.onDetach();
+      }
+    }
+    for (; i < buf.length; i++) {
       const b = buf[i]!;
-      if (b === 0x03 || b === 0x1d) return true;
+      if (b === 0x03 || b === 0x1d) return this.onDetach();
       if (b === 0x1b) {
         const next = buf[i + 1];
         const after = buf[i + 2];
         // Left arrow: ESC [ D  or  ESC O D
-        if ((next === 0x5b || next === 0x4f) && after === 0x44) return true;
-        // Bare Esc — no continuation in this buffer.
-        if (next === undefined) return true;
-        // Some other escape sequence (cursor up/down, F-keys) — ignore.
-        // Skip until we run out of likely-CSI bytes.
+        if ((next === 0x5b || next === 0x4f) && after === 0x44) return this.onDetach();
+        // Bare Esc at the end of this buffer — defer the decision.
+        if (next === undefined) { this.armPending(); return; }
+        // Some other escape sequence (cursor up/down, F-keys) — skip it.
         i += 1;
         while (i < buf.length - 1) {
           const c = buf[i + 1]!;
@@ -181,19 +240,44 @@ class DetachDetector {
         }
       }
     }
-    return false;
   }
+
+  // Clear any pending timer so a deferred Esc can't fire after detach.
+  dispose(): void {
+    this.clearTimer();
+    this.pendingEsc = false;
+  }
+
+  private armPending(): void {
+    this.pendingEsc = true;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.pendingEsc) { this.pendingEsc = false; this.onDetach(); }
+    }, this.escGraceMs);
+  }
+
+  private clearTimer(): void {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+  }
+}
+
+// Under -qq strace suppresses "Process N attached/detached" and "+++ exited"
+// notices, so a `strace: …` line is almost always a hard error (ptrace
+// EPERM, "Operation not permitted", no such process). Treat the rare
+// attach/detach notice that still slips through as non-fatal.
+function isFatalStraceLine(line: string): boolean {
+  return !/attached|detached/i.test(line);
 }
 
 // Incremental parser for strace stderr. strace writes line-buffered output;
 // we split on \n and pick out `write(1|2, "...", N)`.
-class StraceLineParser {
+export class StraceLineParser {
   private buf = "";
   constructor(
     private readonly attachedPid: number,
     private readonly resolver: FdResolver,
     private readonly onBytes: (bytes: Uint8Array) => void,
-    private readonly onError?: (line: string) => void,
+    private readonly onError?: (line: string, fatal: boolean) => void,
   ) {}
   feed(chunk: Buffer) {
     this.buf += chunk.toString("binary");
@@ -215,7 +299,15 @@ class StraceLineParser {
       while (i < line.length && line.charCodeAt(i) === 0x20) i++;
     }
     if (!line.startsWith("write(", i)) {
-      if (line.startsWith("strace:") && this.onError) this.onError(line);
+      // Surface diagnostics from the wrapped command. `sudo: …` (e.g. "a
+      // password is required", "a terminal is required") is always fatal:
+      // no capture will ever start. `strace: …` under -qq is likewise an
+      // error (attach/detach/exit chatter is suppressed), except the benign
+      // attach/detach notices that can still slip through.
+      if (this.onError) {
+        if (line.startsWith("sudo:")) this.onError(line, true);
+        else if (line.startsWith("strace:")) this.onError(line, isFatalStraceLine(line));
+      }
       return;
     }
     i += "write(".length;
