@@ -16,12 +16,46 @@
 
 import type { Transport } from "./transport.ts";
 
+export type History = { source: string; entries: string[] };
+
+// Async, time-bounded history fetch — used by the live TUI. Every underlying
+// command runs through execCaptureAsync (never blocks the event loop) under a
+// shared `budgetMs` deadline, so attaching to a session on a host that has
+// gone away degrades to "(no readable history)" within a few seconds instead
+// of freezing the UI on a synchronous ssh that hangs ~90s.
+export async function fetchHistoryAsync(
+  transport: Transport,
+  targetUser: string,
+  lines: number,
+  currentUser: string,
+  budgetMs = 5000,
+): Promise<History> {
+  const deadline = Date.now() + budgetMs;
+  const left = () => Math.max(1, deadline - Date.now());
+
+  const { home, shell } = await resolveUserInfoAsync(transport, targetUser, deadline);
+  const needSudo = targetUser !== currentUser;
+  const candidates = historyCandidates(home, shell);
+
+  for (const path of candidates) {
+    if (Date.now() >= deadline) break;
+    const argv = needSudo
+      ? ["sudo", "-n", "tail", "-n", String(lines), path]
+      : ["tail", "-n", String(lines), path];
+    const r = await transport.execCaptureAsync(argv, { timeoutMs: left() });
+    if (r.status !== 0) continue;
+    const entries = parseHistory(r.stdout);
+    if (entries.length) return { source: path, entries };
+  }
+  return { source: candidates[0] ?? `${home}/.bash_history`, entries: [] };
+}
+
 export function fetchHistory(
   transport: Transport,
   targetUser: string,
   lines: number,
   currentUser: string,
-): { source: string; entries: string[] } {
+): History {
   const { home, shell } = resolveUserInfo(transport, targetUser);
   const needSudo = targetUser !== currentUser;
   const candidates = historyCandidates(home, shell);
@@ -56,6 +90,25 @@ function resolveUserInfo(
     }
   }
   // getent missing or user unknown — fall back to the conventional layout.
+  return { home: user === "root" ? "/root" : `/home/${user}`, shell: "" };
+}
+
+async function resolveUserInfoAsync(
+  transport: Transport,
+  user: string,
+  deadline: number,
+): Promise<{ home: string; shell: string }> {
+  if (Date.now() < deadline) {
+    const timeoutMs = Math.max(1, deadline - Date.now());
+    const r = await transport.execCaptureAsync(["getent", "passwd", user], { timeoutMs });
+    if (r.status === 0) {
+      const line = r.stdout.split("\n").find((l) => l.trim().length > 0);
+      if (line) {
+        const f = line.split(":");
+        if (f.length >= 7 && f[5]) return { home: f[5]!, shell: f[6] ?? "" };
+      }
+    }
+  }
   return { home: user === "root" ? "/root" : `/home/${user}`, shell: "" };
 }
 

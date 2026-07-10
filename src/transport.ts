@@ -41,8 +41,14 @@ export interface Transport {
    * Non-blocking sibling of execCapture. Prefer this from anything that
    * runs while the TUI is live (session refresh, history): a blocking
    * spawnSync would stall the OpenTUI redraw for the full SSH round-trip.
+   *
+   * `timeoutMs` bounds the wait: if the command hasn't finished by then the
+   * child is killed and a failed CaptureResult is returned. Essential for
+   * SSH — a host that has gone away multiplexes a command through the (still
+   * "up") control connection that then hangs until ssh's keepalive gives up
+   * ~90s later. With a timeout the caller degrades gracefully instead.
    */
-  execCaptureAsync(argv: string[]): Promise<CaptureResult>;
+  execCaptureAsync(argv: string[], opts?: { timeoutMs?: number }): Promise<CaptureResult>;
   /** Spawn a long-running command, return the child for piping. */
   spawnPipe(argv: string[], opts?: SpawnOptions): ChildProcess;
   /** Tear down any persistent state (e.g. the SSH ControlMaster). */
@@ -50,14 +56,29 @@ export interface Transport {
 }
 
 // Collect stdout/stderr from an already-spawned child into a CaptureResult.
-function captureChild(child: ChildProcess): Promise<CaptureResult> {
+// If timeoutMs elapses first, kill the child and resolve as a failure.
+function captureChild(child: ChildProcess, timeoutMs?: number): Promise<CaptureResult> {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const done = (r: CaptureResult) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(r);
+    };
     child.stdout?.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
     child.stderr?.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
-    child.on("error", (e) => resolve({ status: -1, stdout, stderr: stderr || String(e) }));
-    child.on("close", (code) => resolve({ status: code ?? -1, stdout, stderr }));
+    child.on("error", (e) => done({ status: -1, stdout, stderr: stderr || String(e) }));
+    child.on("close", (code) => done({ status: code ?? -1, stdout, stderr }));
+    if (timeoutMs && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch {}
+        done({ status: -1, stdout, stderr: stderr || `timed out after ${timeoutMs}ms` });
+      }, timeoutMs);
+    }
   });
 }
 
@@ -70,10 +91,10 @@ export class LocalTransport implements Transport {
     const r = spawnSync(cmd, args, { encoding: "utf8" });
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
-  execCaptureAsync(argv: string[]): Promise<CaptureResult> {
+  execCaptureAsync(argv: string[], opts?: { timeoutMs?: number }): Promise<CaptureResult> {
     const [cmd, ...args] = argv;
     if (!cmd) return Promise.resolve({ status: -1, stdout: "", stderr: "empty argv" });
-    return captureChild(spawn(cmd, args));
+    return captureChild(spawn(cmd, args), opts?.timeoutMs);
   }
   spawnPipe(argv: string[], opts: SpawnOptions = {}): ChildProcess {
     const [cmd, ...args] = argv;
@@ -128,6 +149,12 @@ export class SshTransport implements Transport {
       "-o", "ControlPersist=600",
       "-o", "StrictHostKeyChecking=accept-new",
       "-o", "ServerAliveInterval=30",
+      // Fail fast on a dead host instead of blocking the (synchronous) open:
+      // ConnectTimeout bounds the TCP/handshake wait, and BatchMode prevents
+      // ssh from stalling on a password/passphrase prompt this TUI can't show
+      // — auth must be non-interactive (keys/agent) for twatch anyway.
+      "-o", "ConnectTimeout=8",
+      "-o", "BatchMode=yes",
       "-n", "-N", "-f",
       ...this.extra,
       this.target,
@@ -149,7 +176,7 @@ export class SshTransport implements Transport {
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
 
-  execCaptureAsync(argv: string[]): Promise<CaptureResult> {
+  execCaptureAsync(argv: string[], opts?: { timeoutMs?: number }): Promise<CaptureResult> {
     if (!this.opened) {
       // open() is a one-time synchronous handshake; if it fails, surface
       // that as a failed capture rather than rejecting the promise.
@@ -161,7 +188,7 @@ export class SshTransport implements Transport {
     }
     const remote = quoteForRemoteShell(argv);
     const sshArgs = ["-S", this.socket, ...this.extra, this.target, "--", remote];
-    return captureChild(spawn("ssh", sshArgs));
+    return captureChild(spawn("ssh", sshArgs), opts?.timeoutMs);
   }
 
   spawnPipe(argv: string[], opts: SpawnOptions = {}): ChildProcess {

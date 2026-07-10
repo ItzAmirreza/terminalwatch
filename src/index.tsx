@@ -7,7 +7,7 @@ import { TargetsList } from "./ui/TargetsList.tsx";
 import { AddTargetForm } from "./ui/AddTargetForm.tsx";
 import { hostLabel, isLinux, listSessionsAsync, type Session } from "./sessions.ts";
 import { startWatch, demoMockStream } from "./watch.ts";
-import { fetchHistory, renderPreamble } from "./history.ts";
+import { fetchHistoryAsync, renderPreamble } from "./history.ts";
 import { formatGeo, lookup, lookupCached } from "./geoip.ts";
 import { LocalTransport, SshTransport, type Transport } from "./transport.ts";
 import { listTargets, LOCAL_TARGET, targetToSsh, type Target } from "./targets.ts";
@@ -260,7 +260,7 @@ function SessionsScreen(props: {
       const geoInfo = lookupCached(sess.from) ?? (await lookup(sess.from).catch(() => null));
       const history = MOCK
         ? { source: "(mock)", entries: ["ls -la", "vim deploy.yml", "sudo systemctl restart api"] }
-        : fetchHistory(transport, sess.user, 10, userInfo().username);
+        : await fetchHistoryAsync(transport, sess.user, 10, userInfo().username);
       const preamble = renderPreamble({
         user: sess.user,
         tty: sess.tty,

@@ -44,13 +44,20 @@ export function listSessions(transport: Transport): Session[] {
   return assembleSessions(who, psRows, idleMap, selfTty);
 }
 
+// Cap each SSH round-trip on the refresh so a host that has gone away can't
+// leave a refresh pending forever (the caller's in-flight guard would then
+// stop all future refreshes) — it fails fast and the list simply stops
+// updating with the last-known rows.
+const REFRESH_TIMEOUT_MS = 6000;
+
 export async function listSessionsAsync(transport: Transport): Promise<Session[]> {
   if (MOCK) return mockSessions();
   if (transport.isLocal() && !isLinux()) return [];
 
+  const t = { timeoutMs: REFRESH_TIMEOUT_MS };
   const [whoRes, psRes] = await Promise.all([
-    transport.execCaptureAsync(["who"]),
-    transport.execCaptureAsync(["ps", "-e", "-o", "pid=,tty=,stat=,comm="]),
+    transport.execCaptureAsync(["who"], t),
+    transport.execCaptureAsync(["ps", "-e", "-o", "pid=,tty=,stat=,comm="], t),
   ]);
   const who = parseWho(runText(whoRes));
   const psRows = parsePs(runText(psRes));
@@ -190,7 +197,7 @@ function idleSync(transport: Transport, ttyDevs: string[]): Record<string, strin
 async function idleAsync(transport: Transport, ttyDevs: string[]): Promise<Record<string, string>> {
   if (transport.isLocal()) return idleLocal(ttyDevs);
   if (ttyDevs.length === 0) return {};
-  const r = await transport.execCaptureAsync(["stat", "-c", "%n %X", ...ttyDevs]);
+  const r = await transport.execCaptureAsync(["stat", "-c", "%n %X", ...ttyDevs], { timeoutMs: REFRESH_TIMEOUT_MS });
   return parseStatIdle(r.status === 0 ? r.stdout : null, ttyDevs);
 }
 
